@@ -8,3 +8,63 @@
 export interface HealthStatus {
   status: string;
 }
+
+export interface DataMeta {
+  /** Number of in-sample rows */
+  isRows: number;
+  /** Number of out-of-sample rows */
+  oosRows: number;
+  /** Available alpha signal column names */
+  alphas: string[];
+}
+
+/**
+ * A single upstream filter step — rows are kept only if they fall in one of the selectedBuckets
+ */
+export interface BucketFilter {
+  alphaId: string;
+  thresholds: number[];
+  selectedBuckets: number[];
+}
+
+/**
+ * Which dataset to query — in-sample or out-of-sample
+ */
+export type BucketRequestDataset =
+  (typeof BucketRequestDataset)[keyof typeof BucketRequestDataset];
+
+export const BucketRequestDataset = {
+  is: "is",
+  oos: "oos",
+} as const;
+
+export interface BucketRequest {
+  /** Which dataset to query — in-sample or out-of-sample */
+  dataset: BucketRequestDataset;
+  /** Alpha signal column to split on */
+  alphaId: string;
+  /** Sorted bps thresholds defining bucket boundaries */
+  thresholds: number[];
+  /** Optional chain of upstream bucket selections applied before the current split */
+  upstreamFilters?: BucketFilter[];
+}
+
+export interface BucketStat {
+  label: string;
+  n: number;
+  r60: number;
+  r300: number;
+  r1800: number;
+}
+
+export interface BucketResponse {
+  buckets: BucketStat[];
+  /** Rows remaining after upstream filters */
+  filteredRows: number;
+  /** Total rows in the dataset before any filtering */
+  totalRows: number;
+}
+
+export interface ErrorResponse {
+  error: string;
+}

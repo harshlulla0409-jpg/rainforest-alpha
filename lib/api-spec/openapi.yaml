@@ -10,6 +10,10 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: data
+    description: Dataset metadata
+  - name: buckets
+    description: Alpha bucketing operations
 paths:
   /healthz:
     get:
@@ -24,6 +28,47 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /data/meta:
+    get:
+      operationId: getDataMeta
+      tags: [data]
+      summary: Dataset metadata
+      description: Returns row counts and available alpha signal names for IS and OOS datasets
+      responses:
+        "200":
+          description: Metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataMeta"
+  /buckets:
+    post:
+      operationId: getBuckets
+      tags: [buckets]
+      summary: Compute bucket statistics
+      description: >
+        Filters the requested dataset through an optional chain of upstream
+        bucket selections, then splits the resulting rows by alphaId/thresholds
+        and returns per-bucket statistics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BucketRequest"
+      responses:
+        "200":
+          description: Bucket statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BucketResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +78,106 @@ components:
           type: string
       required:
         - status
-
+    DataMeta:
+      type: object
+      properties:
+        isRows:
+          type: integer
+          description: Number of in-sample rows
+        oosRows:
+          type: integer
+          description: Number of out-of-sample rows
+        alphas:
+          type: array
+          description: Available alpha signal column names
+          items:
+            type: string
+      required:
+        - isRows
+        - oosRows
+        - alphas
+    BucketFilter:
+      type: object
+      description: A single upstream filter step — rows are kept only if they fall in one of the selectedBuckets
+      properties:
+        alphaId:
+          type: string
+        thresholds:
+          type: array
+          items:
+            type: number
+        selectedBuckets:
+          type: array
+          items:
+            type: integer
+      required:
+        - alphaId
+        - thresholds
+        - selectedBuckets
+    BucketRequest:
+      type: object
+      properties:
+        dataset:
+          type: string
+          enum: [is, oos]
+          description: Which dataset to query — in-sample or out-of-sample
+        alphaId:
+          type: string
+          description: Alpha signal column to split on
+        thresholds:
+          type: array
+          items:
+            type: number
+          description: Sorted bps thresholds defining bucket boundaries
+        upstreamFilters:
+          type: array
+          description: Optional chain of upstream bucket selections applied before the current split
+          items:
+            $ref: "#/components/schemas/BucketFilter"
+      required:
+        - dataset
+        - alphaId
+        - thresholds
+    BucketStat:
+      type: object
+      properties:
+        label:
+          type: string
+        n:
+          type: integer
+        r60:
+          type: number
+        r300:
+          type: number
+        r1800:
+          type: number
+      required:
+        - label
+        - n
+        - r60
+        - r300
+        - r1800
+    BucketResponse:
+      type: object
+      properties:
+        buckets:
+          type: array
+          items:
+            $ref: "#/components/schemas/BucketStat"
+        filteredRows:
+          type: integer
+          description: Rows remaining after upstream filters
+        totalRows:
+          type: integer
+          description: Total rows in the dataset before any filtering
+      required:
+        - buckets
+        - filteredRows
+        - totalRows
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error

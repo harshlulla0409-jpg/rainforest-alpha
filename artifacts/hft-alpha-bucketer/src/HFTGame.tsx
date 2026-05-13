@@ -10,81 +10,76 @@ const ALPHAS = [
 ];
 
 const RETURN_HORIZONS = [
-  { label: "60s", key: "r60", seconds: 60 },
-  { label: "300s", key: "r300", seconds: 300 },
-  { label: "1800s", key: "r1800", seconds: 1800 },
+  { label: "60s", key: "r60" },
+  { label: "300s", key: "r300" },
+  { label: "1800s", key: "r1800" },
 ];
-
-function gaussianRandom(mean = 0, std = 1) {
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return mean + std * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
-
-type Row = {
-  [key: string]: number;
-  r60: number;
-  r300: number;
-  r1800: number;
-  idx: number;
-};
-
-function generateDataset(seed: number, nRows = 2000): Row[] {
-  const rng = (s: number) => {
-    const x = Math.sin(s * 9301 + 49297) * 233280;
-    return x - Math.floor(x);
-  };
-  const rows: Row[] = [];
-  for (let i = 0; i < nRows; i++) {
-    const s = seed + i;
-    const alphaVals: { [key: string]: number } = {};
-    ALPHAS.forEach((a, ai) => {
-      alphaVals[a.id] = gaussianRandom(0, 1) * (rng(s * (ai + 1)) > 0.5 ? 1 : -1);
-    });
-    const signal =
-      0.25 * alphaVals["obi_pressure"] +
-      0.15 * alphaVals["trade_flow_imb"] +
-      0.10 * alphaVals["microprice_dev"] -
-      0.08 * alphaVals["vwap_spread"] +
-      0.05 * alphaVals["depth_slope"] -
-      0.04 * alphaVals["cancel_ratio"];
-    const r60  = signal * 0.8  + gaussianRandom(0, 2.5);
-    const r300 = signal * 1.2  + gaussianRandom(0, 3.5);
-    const r1800 = signal * 1.8  + gaussianRandom(0, 5.0);
-    rows.push({ ...alphaVals, r60, r300, r1800, idx: i });
-  }
-  return rows;
-}
 
 const DEFAULT_BPS_THRESHOLDS = [-20, -10, -5, -2, 0, 2, 5, 10, 20];
 
-function bucketRows(rows: Row[], alphaId: string, thresholds: number[]): Row[][] {
-  const buckets: Row[][] = Array.from({ length: thresholds.length + 1 }, () => []);
-  rows.forEach((row) => {
-    const val = row[alphaId] * 10;
-    let bi = 0;
-    for (; bi < thresholds.length; bi++) {
-      if (val < thresholds[bi]) break;
-    }
-    buckets[bi].push(row);
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type BucketStat = { label: string; n: number; r60: number; r300: number; r1800: number };
+type AggStats   = { n: number; r60: number; r300: number; r1800: number };
+
+type Level = {
+  alphaId: string;
+  thresholds: number[];
+  selectedBuckets: number[];
+  buckets: BucketStat[];
+  filteredRows: number;
+  totalRows: number;
+};
+
+type OOSResults = {
+  stats: AggStats;
+  n: number;
+  totalRows: number;
+};
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+
+async function apiFetchMeta(): Promise<{ isRows: number; oosRows: number }> {
+  const res = await fetch("/api/data/meta");
+  if (!res.ok) throw new Error(`meta ${res.status}`);
+  return res.json();
+}
+
+async function apiFetchBuckets(
+  dataset: "is" | "oos",
+  alphaId: string,
+  thresholds: number[],
+  upstreamFilters: { alphaId: string; thresholds: number[]; selectedBuckets: number[] }[],
+): Promise<{ buckets: BucketStat[]; filteredRows: number; totalRows: number }> {
+  const res = await fetch("/api/buckets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dataset, alphaId, thresholds, upstreamFilters }),
   });
-  return buckets;
+  if (!res.ok) throw new Error(`buckets ${res.status}`);
+  return res.json();
 }
 
-type BucketStats = { n: number; r60: number; r300: number; r1800: number };
+// ── Stat helpers ──────────────────────────────────────────────────────────────
 
-function bucketStats(rows: Row[]): BucketStats {
-  if (!rows.length) return { n: 0, r60: 0, r300: 0, r1800: 0 };
-  const mean = (key: string) => rows.reduce((s, r) => s + r[key], 0) / rows.length;
-  return { n: rows.length, r60: mean("r60"), r300: mean("r300"), r1800: mean("r1800") };
+function aggStats(buckets: BucketStat[], selected: number[]): AggStats {
+  const rows = buckets.filter((_, i) => selected.includes(i));
+  const totalN = rows.reduce((s, b) => s + b.n, 0);
+  if (totalN === 0) return { n: 0, r60: 0, r300: 0, r1800: 0 };
+  const wmean = (key: "r60" | "r300" | "r1800") =>
+    rows.reduce((s, b) => s + b[key] * b.n, 0) / totalN;
+  return { n: totalN, r60: wmean("r60"), r300: wmean("r300"), r1800: wmean("r1800") };
 }
 
-function bucketLabel(thresholds: number[], i: number) {
-  if (i === 0) return `< ${thresholds[0]} bps`;
-  if (i === thresholds.length) return `≥ ${thresholds[thresholds.length - 1]} bps`;
-  return `${thresholds[i - 1]} – ${thresholds[i]} bps`;
+function buildUpstreamFilters(levels: Level[], upToIdx: number) {
+  return levels.slice(0, upToIdx).map((l) => ({
+    alphaId: l.alphaId,
+    thresholds: l.thresholds,
+    selectedBuckets: l.selectedBuckets,
+  }));
 }
+
+// ── Color / bar helpers ───────────────────────────────────────────────────────
 
 function pnlColor(val: number) {
   if (val > 2) return "#00ff9d";
@@ -98,76 +93,81 @@ function barWidth(val: number, maxAbs: number) {
   return maxAbs === 0 ? 0 : Math.min(100, (Math.abs(val) / maxAbs) * 100);
 }
 
-type Level = {
-  alphaId: string;
-  thresholds: number[];
-  buckets: Row[][];
-  selectedBuckets: number[];
-};
-
-type OOSResults = {
-  stats: BucketStats;
-  n: number;
-  totalRows: number;
-};
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function HFTGame() {
   const [phase, setPhase] = useState<"intro" | "build" | "oos" | "results">("intro");
-  const [inSampleData, setInSampleData] = useState<Row[]>([]);
-  const [oosData, setOosData] = useState<Row[]>([]);
+  const [meta, setMeta] = useState<{ isRows: number; oosRows: number } | null>(null);
 
   const [levels, setLevels] = useState<Level[]>([]);
   const [editingLevel, setEditingLevel] = useState<number | null>(null);
   const [pendingAlpha, setPendingAlpha] = useState(ALPHAS[0].id);
   const [pendingThresholds, setPendingThresholds] = useState([...DEFAULT_BPS_THRESHOLDS]);
   const [thresholdInput, setThresholdInput] = useState(DEFAULT_BPS_THRESHOLDS.join(", "));
+  const [previewData, setPreviewData] = useState<{ buckets: BucketStat[]; filteredRows: number } | null>(null);
+
+  const [isLoading, setIsLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   const [oosProgress, setOosProgress] = useState(0);
   const [oosResults, setOosResults] = useState<OOSResults | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const activeRows = useCallback(() => {
-    if (!levels.length) return inSampleData;
-    let rows = inSampleData;
-    for (const lvl of levels) {
-      if (!lvl.selectedBuckets || !lvl.selectedBuckets.length) break;
-      const buckets = bucketRows(rows, lvl.alphaId, lvl.thresholds);
-      rows = lvl.selectedBuckets.flatMap((bi) => buckets[bi] || []);
-    }
-    return rows;
-  }, [levels, inSampleData]);
+  // ── Derived stats from current level selections ────────────────────────────
+  const lastActiveLvl = [...levels].reverse().find((l) => l.selectedBuckets.length > 0);
+  const currentStats: AggStats = lastActiveLvl
+    ? aggStats(lastActiveLvl.buckets, lastActiveLvl.selectedBuckets)
+    : { n: 0, r60: 0, r300: 0, r1800: 0 };
+  const score = currentStats.r60 * 1 + currentStats.r300 * 0.7 + currentStats.r1800 * 0.4;
+  const coverage = meta && currentStats.n > 0 ? (currentStats.n / meta.isRows) * 100 : 0;
 
-  const oosActiveRows = useCallback(() => {
-    if (!levels.length) return oosData;
-    let rows = oosData;
-    for (const lvl of levels) {
-      if (!lvl.selectedBuckets || !lvl.selectedBuckets.length) break;
-      const buckets = bucketRows(rows, lvl.alphaId, lvl.thresholds);
-      rows = lvl.selectedBuckets.flatMap((bi) => buckets[bi] || []);
-    }
-    return rows;
-  }, [levels, oosData]);
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
-  function startGame() {
-    const is = generateDataset(42, 3000);
-    const oos = generateDataset(137, 1000);
-    setInSampleData(is);
-    setOosData(oos);
-    setLevels([]);
-    setEditingLevel(null);
-    setPendingAlpha(ALPHAS[0].id);
-    setPendingThresholds([...DEFAULT_BPS_THRESHOLDS]);
-    setThresholdInput(DEFAULT_BPS_THRESHOLDS.join(", "));
-    setPhase("build");
+  // ── Refresh preview whenever pendingAlpha/thresholds/editingLevel change ───
+  const refreshPreview = useCallback(async (
+    lvlIdx: number, alphaId: string, thresholds: number[], currentLevels: Level[],
+  ) => {
+    const upstream = buildUpstreamFilters(currentLevels, lvlIdx);
+    try {
+      const data = await apiFetchBuckets("is", alphaId, thresholds, upstream);
+      setPreviewData({ buckets: data.buckets, filteredRows: data.filteredRows });
+    } catch {
+      setPreviewData(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (editingLevel === null) { setPreviewData(null); return; }
+    refreshPreview(editingLevel, pendingAlpha, pendingThresholds, levels);
+  }, [editingLevel, pendingAlpha, pendingThresholds, levels, refreshPreview]);
+
+  // ── Game flow ──────────────────────────────────────────────────────────────
+
+  async function startGame() {
+    setIsLoading(true);
+    setApiError(null);
+    try {
+      const m = await apiFetchMeta();
+      setMeta(m);
+      setLevels([]);
+      setEditingLevel(null);
+      setPendingAlpha(ALPHAS[0].id);
+      setPendingThresholds([...DEFAULT_BPS_THRESHOLDS]);
+      setThresholdInput(DEFAULT_BPS_THRESHOLDS.join(", "));
+      setOosResults(null);
+      setPhase("build");
+    } catch (e) {
+      setApiError(String(e));
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   function addLevel() {
-    const lvlIdx = levels.length;
-    setEditingLevel(lvlIdx);
+    setEditingLevel(levels.length);
     setPendingAlpha(ALPHAS[0].id);
-    const t = [...DEFAULT_BPS_THRESHOLDS];
-    setPendingThresholds(t);
-    setThresholdInput(t.join(", "));
+    setPendingThresholds([...DEFAULT_BPS_THRESHOLDS]);
+    setThresholdInput(DEFAULT_BPS_THRESHOLDS.join(", "));
   }
 
   function editLevel(idx: number) {
@@ -178,41 +178,40 @@ export default function HFTGame() {
     setThresholdInput(lvl.thresholds.join(", "));
   }
 
-  function applyPendingLevel() {
+  async function applyPendingLevel() {
     if (editingLevel === null) return;
-    const rows = editingLevel === 0 ? inSampleData : (() => {
-      let r = inSampleData;
-      for (let i = 0; i < editingLevel; i++) {
-        const lvl = levels[i];
-        if (!lvl.selectedBuckets?.length) break;
-        const b = bucketRows(r, lvl.alphaId, lvl.thresholds);
-        r = lvl.selectedBuckets.flatMap((bi) => b[bi] || []);
-      }
-      return r;
-    })();
-    const buckets = bucketRows(rows, pendingAlpha, pendingThresholds);
-    const newLvl: Level = {
-      alphaId: pendingAlpha,
-      thresholds: [...pendingThresholds],
-      buckets,
-      selectedBuckets: [],
-    };
-    const newLevels = [...levels.slice(0, editingLevel), newLvl];
-    setLevels(newLevels);
-    setEditingLevel(null);
+    setIsLoading(true);
+    setApiError(null);
+    try {
+      const upstream = buildUpstreamFilters(levels, editingLevel);
+      const data = await apiFetchBuckets("is", pendingAlpha, pendingThresholds, upstream);
+      const newLvl: Level = {
+        alphaId: pendingAlpha,
+        thresholds: [...pendingThresholds],
+        buckets: data.buckets,
+        filteredRows: data.filteredRows,
+        totalRows: data.totalRows,
+        selectedBuckets: [],
+      };
+      setLevels((prev) => [...prev.slice(0, editingLevel), newLvl]);
+      setEditingLevel(null);
+    } catch (e) {
+      setApiError(String(e));
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   function toggleBucket(lvlIdx: number, bucketIdx: number) {
-    setLevels((prev) => {
-      const updated = prev.map((lvl, i) => {
+    setLevels((prev) =>
+      prev.slice(0, lvlIdx + 1).map((lvl, i) => {
         if (i !== lvlIdx) return lvl;
         const sel = lvl.selectedBuckets.includes(bucketIdx)
           ? lvl.selectedBuckets.filter((b) => b !== bucketIdx)
           : [...lvl.selectedBuckets, bucketIdx];
         return { ...lvl, selectedBuckets: sel };
-      });
-      return updated.slice(0, lvlIdx + 1);
-    });
+      }),
+    );
   }
 
   function removeLevel(idx: number) {
@@ -220,30 +219,39 @@ export default function HFTGame() {
     setEditingLevel(null);
   }
 
-  function startOOS() {
+  async function startOOS() {
+    if (!levels.length) return;
     setPhase("oos");
     setOosProgress(0);
-    setOosResults(null);
+    setApiError(null);
+
+    // Fire OOS API call immediately — animate in parallel
+    const lastLvl = levels[levels.length - 1];
+    const upstream = buildUpstreamFilters(levels, levels.length - 1);
+
+    let oosResultData: OOSResults | null = null;
+    try {
+      const data = await apiFetchBuckets("oos", lastLvl.alphaId, lastLvl.thresholds, upstream);
+      const stats = aggStats(data.buckets, lastLvl.selectedBuckets);
+      oosResultData = { stats, n: stats.n, totalRows: data.totalRows };
+    } catch (e) {
+      setApiError(String(e));
+    }
+
+    // Animate progress bar then reveal results
     let progress = 0;
     timerRef.current = setInterval(() => {
       progress += 2;
-      setOosProgress(progress);
+      setOosProgress(Math.min(progress, 100));
       if (progress >= 100) {
         if (timerRef.current) clearInterval(timerRef.current);
-        const rows = oosActiveRows();
-        const stats = bucketStats(rows);
-        setOosResults({ stats, n: rows.length, totalRows: oosData.length });
+        setOosResults(oosResultData);
         setPhase("results");
       }
     }, 60);
   }
 
-  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
-
-  const currentRows = activeRows();
-  const currentStats = bucketStats(currentRows);
-  const score = currentStats.r60 * 1 + currentStats.r300 * 0.7 + currentStats.r1800 * 0.4;
-  const coverage = inSampleData.length ? (currentRows.length / inSampleData.length) * 100 : 0;
+  // ── Render helpers ─────────────────────────────────────────────────────────
 
   function renderIntro() {
     return (
@@ -260,16 +268,17 @@ export default function HFTGame() {
           <div className="rule"><span className="rule-num">03</span><span>Drill deeper with additional alpha layers</span></div>
           <div className="rule"><span className="rule-num">04</span><span>Trade your rule on an unseen OOS day — see if it holds</span></div>
         </div>
-        <button className="btn-primary btn-big" onClick={startGame}>INITIALIZE SIMULATION</button>
+        {apiError && <div className="error-box">⚠ {apiError}</div>}
+        <button className="btn-primary btn-big" onClick={startGame} disabled={isLoading}>
+          {isLoading ? "CONNECTING…" : "INITIALIZE SIMULATION"}
+        </button>
       </div>
     );
   }
 
   function renderBucketLevel(lvl: Level, lvlIdx: number) {
-    const maxAbs = Math.max(...lvl.buckets.map((b) => {
-      const s = bucketStats(b);
-      return Math.max(Math.abs(s.r60), Math.abs(s.r300), Math.abs(s.r1800));
-    }), 0.1);
+    const maxAbs = Math.max(...lvl.buckets.map((b) =>
+      Math.max(Math.abs(b.r60), Math.abs(b.r300), Math.abs(b.r1800))), 0.1);
 
     return (
       <div key={lvlIdx} className="level-card">
@@ -285,21 +294,20 @@ export default function HFTGame() {
           </div>
         </div>
         <div className="buckets-grid">
-          {lvl.buckets.map((bRows, bi) => {
-            const stats = bucketStats(bRows);
+          {lvl.buckets.map((b, bi) => {
             const selected = lvl.selectedBuckets.includes(bi);
-            const dominant = Math.abs(stats.r60) > 0.5 ? (stats.r60 > 0 ? "long" : "short") : "neutral";
+            const dominant = Math.abs(b.r60) > 0.5 ? (b.r60 > 0 ? "long" : "short") : "neutral";
             return (
               <div
                 key={bi}
                 className={`bucket-row ${selected ? "selected" : ""} ${dominant}`}
                 onClick={() => toggleBucket(lvlIdx, bi)}
               >
-                <div className="bucket-label">{bucketLabel(lvl.thresholds, bi)}</div>
-                <div className="bucket-n">n={stats.n.toLocaleString()}</div>
+                <div className="bucket-label">{b.label}</div>
+                <div className="bucket-n">n={b.n.toLocaleString()}</div>
                 <div className="bucket-bars">
                   {RETURN_HORIZONS.map(({ key, label }) => {
-                    const v = stats[key as keyof BucketStats] as number;
+                    const v = b[key as "r60" | "r300" | "r1800"];
                     return (
                       <div key={key} className="bar-row">
                         <span className="bar-label">{label}</span>
@@ -334,17 +342,6 @@ export default function HFTGame() {
   function renderEditor() {
     if (editingLevel === null) return null;
     const isNew = editingLevel === levels.length;
-    const feedRows = editingLevel === 0 ? inSampleData : (() => {
-      let r = inSampleData;
-      for (let i = 0; i < editingLevel; i++) {
-        const lvl = levels[i];
-        if (!lvl.selectedBuckets?.length) break;
-        const b = bucketRows(r, lvl.alphaId, lvl.thresholds);
-        r = lvl.selectedBuckets.flatMap((bi) => b[bi] || []);
-      }
-      return r;
-    })();
-    const previewBuckets = bucketRows(feedRows, pendingAlpha, pendingThresholds);
 
     return (
       <div className="editor-panel">
@@ -371,30 +368,38 @@ export default function HFTGame() {
             value={thresholdInput}
             onChange={(e) => {
               setThresholdInput(e.target.value);
-              const parsed = e.target.value.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n)).sort((a, b) => a - b);
+              const parsed = e.target.value
+                .split(",")
+                .map((s) => parseFloat(s.trim()))
+                .filter((n) => !isNaN(n))
+                .sort((a, b) => a - b);
               if (parsed.length > 0) setPendingThresholds(parsed);
             }}
           />
         </div>
-        <div className="editor-preview">
-          <div className="preview-label">PREVIEW ({feedRows.length.toLocaleString()} rows → {previewBuckets.length} buckets)</div>
-          <div className="preview-mini-buckets">
-            {previewBuckets.map((bRows, bi) => {
-              const stats = bucketStats(bRows);
-              return (
+        {previewData && (
+          <div className="editor-preview">
+            <div className="preview-label">
+              PREVIEW ({previewData.filteredRows.toLocaleString()} rows → {previewData.buckets.length} buckets)
+            </div>
+            <div className="preview-mini-buckets">
+              {previewData.buckets.map((b, bi) => (
                 <div key={bi} className="preview-bucket">
-                  <span className="preview-bucket-label">{bucketLabel(pendingThresholds, bi)}</span>
-                  <span className="preview-bucket-n">n={stats.n}</span>
-                  <span className="preview-bucket-ret" style={{ color: pnlColor(stats.r60) }}>
-                    60s: {stats.r60 >= 0 ? "+" : ""}{stats.r60.toFixed(2)}
+                  <span className="preview-bucket-label">{b.label}</span>
+                  <span className="preview-bucket-n">n={b.n}</span>
+                  <span className="preview-bucket-ret" style={{ color: pnlColor(b.r60) }}>
+                    60s: {b.r60 >= 0 ? "+" : ""}{b.r60.toFixed(2)}
                   </span>
                 </div>
-              );
-            })}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
+        {apiError && <div className="error-box">⚠ {apiError}</div>}
         <div className="editor-btns">
-          <button className="btn-primary" onClick={applyPendingLevel}>APPLY</button>
+          <button className="btn-primary" onClick={applyPendingLevel} disabled={isLoading}>
+            {isLoading ? "LOADING…" : "APPLY"}
+          </button>
           <button className="btn-ghost" onClick={() => setEditingLevel(null)}>CANCEL</button>
         </div>
       </div>
@@ -412,7 +417,7 @@ export default function HFTGame() {
         <div className="build-left">
           <div className="build-header">
             <div className="build-title">STRATEGY BUILDER</div>
-            <div className="build-subtitle">IN-SAMPLE · {inSampleData.length.toLocaleString()} EVENTS</div>
+            <div className="build-subtitle">IN-SAMPLE · {meta?.isRows.toLocaleString() ?? "—"} EVENTS</div>
           </div>
 
           {editingLevel !== null && renderEditor()}
@@ -448,15 +453,15 @@ export default function HFTGame() {
             </div>
             <div className="stats-row">
               <span className="stats-label">Matched rows</span>
-              <span className="stats-val">{currentRows.length.toLocaleString()}</span>
+              <span className="stats-val">{currentStats.n.toLocaleString()}</span>
             </div>
             <div className="stats-divider" />
             <div className="stats-title">EXPECTED EDGE</div>
             {RETURN_HORIZONS.map(({ key, label }) => (
               <div key={key} className="stats-row">
                 <span className="stats-label">{label}</span>
-                <span className="stats-val" style={{ color: pnlColor(currentStats[key as keyof BucketStats] as number) }}>
-                  {(currentStats[key as keyof BucketStats] as number) >= 0 ? "+" : ""}{(currentStats[key as keyof BucketStats] as number).toFixed(3)} bps
+                <span className="stats-val" style={{ color: pnlColor(currentStats[key as "r60" | "r300" | "r1800"]) }}>
+                  {currentStats[key as "r60" | "r300" | "r1800"] >= 0 ? "+" : ""}{currentStats[key as "r60" | "r300" | "r1800"].toFixed(3)} bps
                 </span>
               </div>
             ))}
@@ -481,6 +486,7 @@ export default function HFTGame() {
           {!hasSelections && (
             <div className="hint-box">Select buckets above to define your rule, then fire it on the unseen day.</div>
           )}
+          {apiError && <div className="error-box">⚠ {apiError}</div>}
         </div>
       </div>
     );
@@ -490,7 +496,7 @@ export default function HFTGame() {
     return (
       <div className="oos-screen">
         <div className="oos-title">EXECUTING STRATEGY</div>
-        <div className="oos-sub">Out-of-sample day · {oosData.length.toLocaleString()} events</div>
+        <div className="oos-sub">Out-of-sample day · {meta?.oosRows.toLocaleString() ?? "—"} events</div>
         <div className="oos-progress-wrap">
           <div className="oos-progress-bar" style={{ width: `${oosProgress}%` }} />
         </div>
@@ -499,7 +505,7 @@ export default function HFTGame() {
           {[...Array(Math.floor(oosProgress / 5))].map((_, i) => (
             <div key={i} className="oos-log-line">
               [{new Date(Date.now() - (20 - i) * 3000).toISOString().slice(11, 19)}]{" "}
-              TRADE {i % 2 === 0 ? "LONG" : "SHORT"} @ {(100 + gaussianRandom(0, 0.05)).toFixed(4)} · filled {Math.floor(10 + Math.random() * 90)} lots
+              TRADE {i % 2 === 0 ? "LONG" : "SHORT"} · bucket matched · forwarded to execution
             </div>
           ))}
         </div>
@@ -513,8 +519,8 @@ export default function HFTGame() {
     const oosScore = stats.r60 * 1 + stats.r300 * 0.7 + stats.r1800 * 0.4;
     const isGood = oosScore > 0;
     const isGoodIS = score > 0;
-
     const overfitRatio = isGoodIS ? oosScore / score : 0;
+
     let grade: string, gradeColor: string;
     if (oosScore > 2)       { grade = "S"; gradeColor = "#00ff9d"; }
     else if (oosScore > 1)  { grade = "A"; gradeColor = "#7fff7f"; }
@@ -539,8 +545,8 @@ export default function HFTGame() {
             {RETURN_HORIZONS.map(({ key, label }) => (
               <div key={key} className="rc-row">
                 <span>{label}</span>
-                <span style={{ color: pnlColor(currentStats[key as keyof BucketStats] as number) }}>
-                  {(currentStats[key as keyof BucketStats] as number) >= 0 ? "+" : ""}{(currentStats[key as keyof BucketStats] as number).toFixed(3)} bps
+                <span style={{ color: pnlColor(currentStats[key as "r60" | "r300" | "r1800"]) }}>
+                  {currentStats[key as "r60" | "r300" | "r1800"] >= 0 ? "+" : ""}{currentStats[key as "r60" | "r300" | "r1800"].toFixed(3)} bps
                 </span>
               </div>
             ))}
@@ -551,8 +557,8 @@ export default function HFTGame() {
             {RETURN_HORIZONS.map(({ key, label }) => (
               <div key={key} className="rc-row">
                 <span>{label}</span>
-                <span style={{ color: pnlColor(stats[key as keyof BucketStats] as number) }}>
-                  {(stats[key as keyof BucketStats] as number) >= 0 ? "+" : ""}{(stats[key as keyof BucketStats] as number).toFixed(3)} bps
+                <span style={{ color: pnlColor(stats[key as "r60" | "r300" | "r1800"]) }}>
+                  {stats[key as "r60" | "r300" | "r1800"] >= 0 ? "+" : ""}{stats[key as "r60" | "r300" | "r1800"].toFixed(3)} bps
                 </span>
               </div>
             ))}
@@ -566,12 +572,16 @@ export default function HFTGame() {
               <div key={i} className="rc-rule-row">
                 <span className="rc-rule-depth">L{i + 1}</span>
                 <span>{ALPHAS.find((a) => a.id === lvl.alphaId)?.label}</span>
-                <span className="rc-rule-buckets">{lvl.selectedBuckets.map((bi) => bucketLabel(lvl.thresholds, bi)).join(", ")}</span>
+                <span className="rc-rule-buckets">
+                  {lvl.selectedBuckets.map((bi) => lvl.buckets[bi]?.label).join(", ")}
+                </span>
               </div>
             ))}
             <div className="rc-row">
               <span>Coverage</span>
-              <span>{coverage.toFixed(1)}% IS / {oosResults.n > 0 ? ((oosResults.n / oosResults.totalRows) * 100).toFixed(1) : 0}% OOS</span>
+              <span>
+                {coverage.toFixed(1)}% IS / {oosResults.totalRows > 0 ? ((oosResults.n / oosResults.totalRows) * 100).toFixed(1) : 0}% OOS
+              </span>
             </div>
           </div>
         </div>
@@ -593,7 +603,7 @@ export default function HFTGame() {
 
         <div className="results-btns">
           <button className="btn-primary" onClick={() => { setPhase("build"); setOosResults(null); }}>REFINE STRATEGY</button>
-          <button className="btn-ghost" onClick={() => { startGame(); }}>NEW SIMULATION</button>
+          <button className="btn-ghost" onClick={startGame}>NEW SIMULATION</button>
         </div>
       </div>
     );
@@ -610,8 +620,8 @@ export default function HFTGame() {
         <div className="hud-right">
           {phase === "build" && (
             <>
-              <div className="hud-stat"><span>IS rows</span><span>{inSampleData.length.toLocaleString()}</span></div>
-              <div className="hud-stat"><span>Matched</span><span>{currentRows.length.toLocaleString()}</span></div>
+              <div className="hud-stat"><span>IS rows</span><span>{meta?.isRows.toLocaleString() ?? "—"}</span></div>
+              <div className="hud-stat"><span>Matched</span><span>{currentStats.n.toLocaleString()}</span></div>
               <div className="hud-stat"><span>Score</span><span style={{ color: pnlColor(score) }}>{score >= 0 ? "+" : ""}{score.toFixed(2)}</span></div>
             </>
           )}
@@ -684,10 +694,10 @@ export default function HFTGame() {
         }
         .btn-primary {
           padding: 10px 24px; font-size: 12px; letter-spacing: 2px;
-          background: #00aaff; color: #060a0f; font-weight: 700;
-          border-radius: 3px;
+          background: #00aaff; color: #060a0f; font-weight: 700; border-radius: 3px;
         }
-        .btn-primary:hover { background: #33bbff; transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
+        .btn-primary:hover:not(:disabled) { background: #33bbff; transform: translateY(-1px); }
         .btn-big { padding: 14px 40px; font-size: 14px; }
         .btn-secondary {
           padding: 10px 20px; font-size: 11px; letter-spacing: 2px;
@@ -716,10 +726,11 @@ export default function HFTGame() {
         .btn-fire-main { font-size: 14px; font-weight: 700; letter-spacing: 3px; }
         .btn-fire-sub { font-size: 10px; letter-spacing: 1px; opacity: 0.8; margin-top: 4px; }
 
+        .error-box { padding: 10px 14px; background: rgba(255,68,85,0.08); border: 1px solid rgba(255,68,85,0.3); border-radius: 4px; font-size: 10px; color: #ff7788; max-width: 440px; width: 100%; }
+
         .build-screen { display: flex; gap: 0; min-height: calc(100vh - 49px); }
         .build-left { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
         .build-right { width: 240px; padding: 20px 16px; border-left: 1px solid rgba(0,180,255,0.1); display: flex; flex-direction: column; gap: 16px; position: sticky; top: 49px; max-height: calc(100vh - 49px); overflow-y: auto; }
-        .build-header { }
         .build-title { font-family: 'Barlow Condensed', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: 3px; color: #00aaff; }
         .build-subtitle { font-size: 9px; letter-spacing: 2px; color: #4a6070; margin-top: 2px; }
 
@@ -733,21 +744,15 @@ export default function HFTGame() {
 
         .buckets-grid { display: flex; flex-direction: column; }
         .bucket-row {
-          display: grid;
-          grid-template-columns: 160px 80px 1fr 100px;
-          align-items: center;
-          gap: 12px;
-          padding: 8px 14px;
-          cursor: pointer;
-          border-bottom: 1px solid rgba(0,180,255,0.05);
-          transition: background 0.1s;
+          display: grid; grid-template-columns: 160px 80px 1fr 100px;
+          align-items: center; gap: 12px; padding: 8px 14px;
+          cursor: pointer; border-bottom: 1px solid rgba(0,180,255,0.05); transition: background 0.1s;
         }
         .bucket-row:last-child { border-bottom: none; }
         .bucket-row:hover { background: rgba(0,180,255,0.06); }
         .bucket-row.selected { background: rgba(0,255,157,0.05); border-left: 3px solid #00ff9d; }
         .bucket-row.long:hover { background: rgba(0,255,157,0.04); }
         .bucket-row.short:hover { background: rgba(255,68,85,0.04); }
-
         .bucket-label { font-size: 10px; color: #8aa0b0; letter-spacing: 0.5px; }
         .bucket-n { font-size: 9px; color: #4a6070; }
         .bucket-bars { display: flex; flex-direction: column; gap: 4px; }
@@ -756,7 +761,6 @@ export default function HFTGame() {
         .bar-track { flex: 1; height: 5px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; position: relative; }
         .bar-fill { position: absolute; top: 0; height: 100%; border-radius: 2px; transition: width 0.3s; }
         .bar-val { font-size: 9px; min-width: 48px; text-align: right; }
-
         .bucket-select-indicator { font-size: 9px; letter-spacing: 1px; text-align: center; padding: 3px 8px; border-radius: 2px; border: 1px solid; }
         .bucket-select-indicator.on { color: #00ff9d; border-color: rgba(0,255,157,0.4); background: rgba(0,255,157,0.08); }
         .bucket-select-indicator.off { color: #2a3a4a; border-color: rgba(42,58,74,0.4); }

@@ -5,18 +5,27 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult,
 } from "@tanstack/react-query";
 
-import type { HealthStatus } from "./api.schemas";
+import type {
+  BucketRequest,
+  BucketResponse,
+  DataMeta,
+  ErrorResponse,
+  HealthStatus,
+} from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
-import type { ErrorType } from "../custom-fetch";
+import type { ErrorType, BodyType } from "../custom-fetch";
 
 type AwaitedInput<T> = PromiseLike<T> | T;
 
@@ -99,3 +108,165 @@ export function useHealthCheck<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * Returns row counts and available alpha signal names for IS and OOS datasets
+ * @summary Dataset metadata
+ */
+export const getGetDataMetaUrl = () => {
+  return `/api/data/meta`;
+};
+
+export const getDataMeta = async (options?: RequestInit): Promise<DataMeta> => {
+  return customFetch<DataMeta>(getGetDataMetaUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetDataMetaQueryKey = () => {
+  return [`/api/data/meta`] as const;
+};
+
+export const getGetDataMetaQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDataMeta>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getDataMeta>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetDataMetaQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getDataMeta>>> = ({
+    signal,
+  }) => getDataMeta({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDataMeta>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDataMetaQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDataMeta>>
+>;
+export type GetDataMetaQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Dataset metadata
+ */
+
+export function useGetDataMeta<
+  TData = Awaited<ReturnType<typeof getDataMeta>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getDataMeta>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDataMetaQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Filters the requested dataset through an optional chain of upstream bucket selections, then splits the resulting rows by alphaId/thresholds and returns per-bucket statistics.
+
+ * @summary Compute bucket statistics
+ */
+export const getGetBucketsUrl = () => {
+  return `/api/buckets`;
+};
+
+export const getBuckets = async (
+  bucketRequest: BucketRequest,
+  options?: RequestInit,
+): Promise<BucketResponse> => {
+  return customFetch<BucketResponse>(getGetBucketsUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(bucketRequest),
+  });
+};
+
+export const getGetBucketsMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof getBuckets>>,
+    TError,
+    { data: BodyType<BucketRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof getBuckets>>,
+  TError,
+  { data: BodyType<BucketRequest> },
+  TContext
+> => {
+  const mutationKey = ["getBuckets"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof getBuckets>>,
+    { data: BodyType<BucketRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return getBuckets(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type GetBucketsMutationResult = NonNullable<
+  Awaited<ReturnType<typeof getBuckets>>
+>;
+export type GetBucketsMutationBody = BodyType<BucketRequest>;
+export type GetBucketsMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Compute bucket statistics
+ */
+export const useGetBuckets = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof getBuckets>>,
+    TError,
+    { data: BodyType<BucketRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof getBuckets>>,
+  TError,
+  { data: BodyType<BucketRequest> },
+  TContext
+> => {
+  return useMutation(getGetBucketsMutationOptions(options));
+};

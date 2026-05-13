@@ -14,3 +14,62 @@ import * as zod from "zod";
 export const HealthCheckResponse = zod.object({
   status: zod.string(),
 });
+
+/**
+ * Returns row counts and available alpha signal names for IS and OOS datasets
+ * @summary Dataset metadata
+ */
+export const GetDataMetaResponse = zod.object({
+  isRows: zod.number().describe("Number of in-sample rows"),
+  oosRows: zod.number().describe("Number of out-of-sample rows"),
+  alphas: zod
+    .array(zod.string())
+    .describe("Available alpha signal column names"),
+});
+
+/**
+ * Filters the requested dataset through an optional chain of upstream bucket selections, then splits the resulting rows by alphaId/thresholds and returns per-bucket statistics.
+
+ * @summary Compute bucket statistics
+ */
+export const GetBucketsBody = zod.object({
+  dataset: zod
+    .enum(["is", "oos"])
+    .describe("Which dataset to query — in-sample or out-of-sample"),
+  alphaId: zod.string().describe("Alpha signal column to split on"),
+  thresholds: zod
+    .array(zod.number())
+    .describe("Sorted bps thresholds defining bucket boundaries"),
+  upstreamFilters: zod
+    .array(
+      zod
+        .object({
+          alphaId: zod.string(),
+          thresholds: zod.array(zod.number()),
+          selectedBuckets: zod.array(zod.number()),
+        })
+        .describe(
+          "A single upstream filter step — rows are kept only if they fall in one of the selectedBuckets",
+        ),
+    )
+    .optional()
+    .describe(
+      "Optional chain of upstream bucket selections applied before the current split",
+    ),
+});
+
+export const GetBucketsResponse = zod.object({
+  buckets: zod.array(
+    zod.object({
+      label: zod.string(),
+      n: zod.number(),
+      r60: zod.number(),
+      r300: zod.number(),
+      r1800: zod.number(),
+    }),
+  ),
+  filteredRows: zod.number().describe("Rows remaining after upstream filters"),
+  totalRows: zod
+    .number()
+    .describe("Total rows in the dataset before any filtering"),
+});

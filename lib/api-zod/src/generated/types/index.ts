@@ -6,4 +6,11 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from "./bucketFilter";
+export * from "./bucketRequest";
+export * from "./bucketRequestDataset";
+export * from "./bucketResponse";
+export * from "./bucketStat";
+export * from "./dataMeta";
+export * from "./errorResponse";
 export * from "./healthStatus";
