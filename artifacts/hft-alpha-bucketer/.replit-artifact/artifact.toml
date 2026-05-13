@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "HFT Alpha Bucketer"
+version = "1.0.0"
+id = "artifacts/hft-alpha-bucketer"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18587
+
+[services.development]
+run = "pnpm --filter @workspace/hft-alpha-bucketer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/hft-alpha-bucketer", "run", "build" ]
+publicDir = "artifacts/hft-alpha-bucketer/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18587"
+BASE_PATH = "/"
