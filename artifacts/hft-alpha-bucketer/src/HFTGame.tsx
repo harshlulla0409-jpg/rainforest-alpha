@@ -51,11 +51,11 @@ const INITIAL_ALPHAS = [
 ];
 
 const INITIAL_FILTERS = [
-  { id: "filter_mddv_cash", label: "MDDV Cash", desc: "" },
-  { id: "filter_mddv_fut", label: "MDDV Fut", desc: "" },
-  { id: "filter_spread_bps_cash", label: "Spread BPS Cash", desc: "" },
-  { id: "filter_volatility_cash", label: "Volatility Cash", desc: "" },
-  { id: "filter_lot_size_fut", label: "Lot Size Fut", desc: "" }
+  { id: "filter_mddv_cash", label: "MDDV Cash", desc: "Thresholds (crs comma seperated)" },
+  { id: "filter_mddv_fut", label: "MDDV Fut", desc: "Thresholds (crs comma seperated)" },
+  { id: "filter_spread_bps_cash", label: "Spread BPS Cash", desc: "Thresholds (bps, comma-separated)" },
+  { id: "filter_volatility_cash", label: "Volatility Cash", desc: "(% comma seperated)" },
+  { id: "filter_lot_size_fut", label: "Lot Size Fut", desc: "units comma seperated" }
 ];
 
 const RETURN_HORIZONS = [
@@ -170,6 +170,13 @@ function barWidth(val: number, maxAbs: number) {
   return maxAbs === 0 ? 0 : Math.min(100, (Math.abs(val) / maxAbs) * 100);
 }
 
+function getMetricConfig(id: string) {
+  if (id.includes("mddv")) return { label: "Thresholds (crs comma seperated)", mult: 1e7, suffix: "cr" };
+  if (id.includes("volatility")) return { label: "Thresholds (% comma seperated)", mult: 1, suffix: "%" };
+  if (id.includes("lot_size")) return { label: "Thresholds (units comma seperated)", mult: 1, suffix: "units" };
+  return { label: "Thresholds (bps, comma-separated)", mult: 1, suffix: "bps" };
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function HFTGame() {
@@ -225,11 +232,13 @@ export default function HFTGame() {
   const refreshPreview = useCallback(async (
     type: "alpha" | "filter", lvlIdx: number, alphaId: string, thresholds: number[], sideVal: 1 | -1,
   ) => {
+    const mult = getMetricConfig(alphaId).mult;
+    const actualThresholds = thresholds.map((t) => t * mult);
     const upstream = type === "alpha" 
       ? buildUpstreamFilters(levels, lvlIdx)
       : [...buildUpstreamFilters(levels, levels.length), ...buildUpstreamFilters(filters, lvlIdx)];
     try {
-      const data = await apiFetchBuckets("is", sideVal, alphaId, thresholds, upstream);
+      const data = await apiFetchBuckets("is", sideVal, alphaId, actualThresholds, upstream);
       setPreviewData({ buckets: data.buckets, filteredRows: data.filteredRows });
     } catch {
       setPreviewData(null);
@@ -278,10 +287,12 @@ export default function HFTGame() {
 
   function editLevel(type: "alpha" | "filter", idx: number) {
     const lvl = type === "alpha" ? levels[idx] : filters[idx];
+    const mult = getMetricConfig(lvl.alphaId).mult;
+    const displayThresholds = lvl.thresholds.map((t) => t / mult);
     setEditingState({ type, idx });
     setPendingAlpha(lvl.alphaId);
-    setPendingThresholds([...lvl.thresholds]);
-    setThresholdInput(lvl.thresholds.join(", "));
+    setPendingThresholds([...displayThresholds]);
+    setThresholdInput(displayThresholds.join(", "));
   }
 
   async function applyPendingLevel() {
@@ -290,14 +301,17 @@ export default function HFTGame() {
     setApiError(null);
     try {
       const { type, idx } = editingState;
+      const mult = getMetricConfig(pendingAlpha).mult;
+      const actualThresholds = pendingThresholds.map((t) => t * mult);
+
       const upstream = type === "alpha" 
         ? buildUpstreamFilters(levels, idx)
         : [...buildUpstreamFilters(levels, levels.length), ...buildUpstreamFilters(filters, idx)];
         
-      const data = await apiFetchBuckets("is", directionMult as 1 | -1, pendingAlpha, pendingThresholds, upstream);
+      const data = await apiFetchBuckets("is", directionMult as 1 | -1, pendingAlpha, actualThresholds, upstream);
       const newLvl: Level = {
         alphaId: pendingAlpha,
-        thresholds: [...pendingThresholds],
+        thresholds: actualThresholds,
         buckets: data.buckets,
         filteredRows: data.filteredRows,
         totalRows: data.totalRows,
@@ -432,6 +446,8 @@ export default function HFTGame() {
       
     const sourceList = type === "alpha" ? availableAlphas : INITIAL_FILTERS;
     const prefix = type === "alpha" ? "L" : "F";
+    const config = getMetricConfig(lvl.alphaId);
+    const displayThresholds = lvl.thresholds.map((t) => t / config.mult);
 
     return (
       <div key={lvlIdx} className="level-card">
@@ -439,7 +455,7 @@ export default function HFTGame() {
           <div className={`level-badge ${type === "filter" ? "filter-badge" : ""}`}>{prefix}{lvlIdx + 1}</div>
           <div className="level-info">
             <span className="level-alpha">{sourceList.find((a) => a.id === lvl.alphaId)?.label}</span>
-            <span className="level-thresholds">{lvl.thresholds.join(", ")} bps</span>
+            <span className="level-thresholds">{displayThresholds.join(", ")} {config.suffix}</span>
           </div>
           <div className="level-actions">
             <button className="btn-xs" onClick={() => editLevel(type, lvlIdx)}>EDIT</button>
@@ -517,7 +533,7 @@ export default function HFTGame() {
           </div>
         </div>
         <div className="editor-row">
-          <label>Thresholds (bps, comma-separated)</label>
+          <label>{getMetricConfig(pendingAlpha).label}</label>
           <input
             className="threshold-input"
             value={thresholdInput}
