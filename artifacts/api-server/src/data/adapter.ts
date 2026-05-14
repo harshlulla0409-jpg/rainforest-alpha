@@ -49,6 +49,7 @@
  */
 
 export type Row = {
+  side: number;
   [alphaId: string]: number;
   r60: number;
   r300: number;
@@ -56,15 +57,65 @@ export type Row = {
 };
 
 export const ALPHA_IDS = [
-  "obi_pressure",
-  "trade_flow_imb",
-  "microprice_dev",
-  "vwap_spread",
-  "depth_slope",
-  "cancel_ratio",
+  "lead_score_slow",
+  "basis_z_fast",
+  "basis_z_slow",
+  "basis_deviation",
+  "cross_asset_ofi_fast",
+  "cross_asset_ofi_slow",
+  "imbalance_divergence",
+  "return_divergence",
+  "vol_spillover",
+  "resistance_ratio",
+  "book_pressure_cash",
+  "rel_book_pressure",
+  "rel_cancel_bid",
+  "rel_cancel_ask",
+  "rel_imbalance_velocity",
+  "rel_smart_ofi",
+  "rel_liquidity_skew",
+  "rel_book_divergence",
+  "rel_bid_depletion",
+  "rel_weighted_imbalance",
+  "toxicity_vpin_slow",
+  "toxicity_vpin_fast",
+  "spoof_flicker_fut",
+  "spoof_flicker_cash",
+  "limit_replenish_fut",
+  "trade_accel_fut",
+  "limit_imbalance_fast_fut",
+  "limit_imbalance_slow_fut",
+  "limit_imbalance_fast_cash",
+  "limit_imbalance_slow_cash",
+  "sector_momentum_slow",
+  "sector_momentum_fast",
+  "vol_participation_fast",
+  "vol_participation_slow",
+  "sector_dispersion",
+  "macro_fracture_slow",
+  "macro_fracture_fast",
+  "relative_strength_slow",
+  "relative_strength_fast",
+  "trend_acceleration",
+  "stock_momentum_fast",
+  "vwap_deviation_z",
+  "unified_lead_score",
+  "taker_imbalance_fut",
+  "taker_imbalance_cash",
+  "l1_imbalance_fut",
+  "l1_imbalance_cash"
+] as const;
+
+export const FILTER_IDS = [
+  "filter_mddv_cash",
+  "filter_mddv_fut",
+  "filter_spread_bps_cash",
+  "filter_volatility_cash",
+  "filter_lot_size_fut"
 ] as const;
 
 export type AlphaId = (typeof ALPHA_IDS)[number];
+export type FilterId = (typeof FILTER_IDS)[number];
 
 // ── In-memory cache so the dataset is generated/loaded only once ──────────────
 let cache: { is: Row[]; oos: Row[] } | null = null;
@@ -81,6 +132,22 @@ export function getDataset(split: "is" | "oos"): Row[] {
 
 export function clearCache(): void {
   cache = null;
+}
+
+// ── Dynamic helper to apply custom regression signal ──────────────────────────
+// Call this from your /api/regression route after computing coefficients
+// to ensure the bucketing endpoint splits perfectly on the OLS weights!
+export function applyRegressionWeights(name: string, coefficients: Record<string, number>): void {
+  if (!cache) return;
+  for (const split of ["is", "oos"] as const) {
+    for (const row of cache[split]) {
+      let val = 0;
+      for (const [feat, weight] of Object.entries(coefficients)) {
+        val += (row[feat] || 0) * weight;
+      }
+      row[name] = val;
+    }
+  }
 }
 
 // ── Synthetic data generator (replace this with your real loader) ─────────────
@@ -104,17 +171,23 @@ function generateSyntheticDataset(seed: number, nRows: number): Row[] {
     ALPHA_IDS.forEach((id, ai) => {
       alphaVals[id] = gaussianRandom(0, 1) * (rng(s * (ai + 1)) > 0.5 ? 1 : -1);
     });
+    
+    FILTER_IDS.forEach((id, ai) => {
+      alphaVals[id] = Math.abs(gaussianRandom(10, 5) * (rng(s * (ai + 50)) > 0.5 ? 1 : -1));
+    });
 
     const signal =
-      0.25 * alphaVals["obi_pressure"]! +
-      0.15 * alphaVals["trade_flow_imb"]! +
-      0.10 * alphaVals["microprice_dev"]! -
-      0.08 * alphaVals["vwap_spread"]! +
-      0.05 * alphaVals["depth_slope"]! -
-      0.04 * alphaVals["cancel_ratio"]!;
+      0.25 * alphaVals["lead_score_slow"]! +
+      0.15 * alphaVals["basis_z_fast"]! +
+      0.10 * alphaVals["imbalance_divergence"]! -
+      0.08 * alphaVals["vwap_deviation_z"]! +
+      0.05 * alphaVals["book_pressure_cash"]! -
+      0.04 * alphaVals["unified_lead_score"]!;
 
     return {
       ...alphaVals,
+      side: rng(s * 100) > 0.5 ? 1 : -1,
+      custom_regression_signal: signal, // baseline fallback for testing
       r60:   signal * 0.8  + gaussianRandom(0, 2.5),
       r300:  signal * 1.2  + gaussianRandom(0, 3.5),
       r1800: signal * 1.8  + gaussianRandom(0, 5.0),
